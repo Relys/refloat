@@ -24,6 +24,7 @@
 #include "atr.h"
 #include "charging.h"
 #include "footpad_sensor.h"
+#include "haptic_buzz.h"
 #include "lcm.h"
 #include "leds.h"
 #include "motor_data.h"
@@ -127,7 +128,10 @@ typedef struct {
     float last_yaw_angle, yaw_angle, abs_yaw_change, last_yaw_change, yaw_change, yaw_aggregate;
     float turntilt_boost_per_erpm, yaw_aggregate_target;
 
-    // Rumtime state values
+    // Feature: Haptic Buzz
+    HapticBuzz haptic_buzz;
+
+    // Runtime state values
     State state;
 
     float proportional;
@@ -256,6 +260,7 @@ static void reconfigure(data *d) {
     balance_filter_configure(&d->balance_filter, &d->float_conf);
     torque_tilt_configure(&d->torque_tilt, &d->float_conf);
     atr_configure(&d->atr, &d->float_conf);
+    haptic_buzz_configure(&d->haptic_buzz, &d->float_conf);
 }
 
 static void configure(data *d) {
@@ -264,7 +269,8 @@ static void configure(data *d) {
     lcm_configure(&d->lcm, &d->float_conf.leds);
 
     // This timer is used to determine how long the board has been disengaged / idle
-    d->disengage_timer = d->current_time;
+    // subtract 1 second to prevent the haptic buzz disengage click on "write config"
+    d->disengage_timer = d->current_time - 1;
 
     // Loop time in microseconds
     d->loop_time_us = 1e6 / d->float_conf.hertz;
@@ -362,6 +368,7 @@ static void reset_vars(data *d) {
     motor_data_reset(&d->motor);
     atr_reset(&d->atr);
     torque_tilt_reset(&d->torque_tilt);
+    haptic_buzz_reset(&d->haptic_buzz, d->current_time);
 
     // Set values for startup
     d->setpoint = d->balance_pitch;
@@ -1415,6 +1422,18 @@ static void refloat_thd(void *arg) {
                     set_current(d, d->pid_value + d->float_conf.startup_click_current);
                 }
             } else {
+                // modulate haptic buzz onto pid_value unconditionally to allow
+                // checking for haptic conditions, and to finish minimum duration haptic effect
+                // even after short pulses of hitting the condition(s)
+                d->pid_value += haptic_buzz_update(
+                    &d->haptic_buzz,
+                    &d->state,
+                    d->current_time,
+                    d->motor.erpm,
+                    d->float_conf.startup_click_current,
+                    0.3,
+                    false
+                );
                 set_current(d, d->pid_value);
             }
 
@@ -1502,8 +1521,26 @@ static void refloat_thd(void *arg) {
                 }
             }
 
-            // Set RC current or maintain brake current (and keep WDT happy!)
-            do_rc_move(d);
+            if ((d->current_time - d->disengage_timer) < 0.008) {
+                // 20ms brake buzz, single tone
+                if (d->float_conf.startup_click_current > 0) {
+                    set_current(
+                        d,
+                        haptic_buzz_update(
+                            &d->haptic_buzz,
+                            &d->state,
+                            d->current_time,
+                            d->motor.erpm,
+                            d->float_conf.startup_click_current,
+                            0.008,
+                            true
+                        )
+                    );
+                }
+            } else {
+                // Set RC current or maintain brake current (and keep WDT happy!)
+                do_rc_move(d);
+            }
             break;
         case (STATE_DISABLED):
             // no set_current, no brake_current
