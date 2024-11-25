@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "conf/datatypes.h"
 #include "vesc_c_if.h"
 
 #include <stdint.h>
@@ -127,3 +128,5 @@ void smooth_rampf(
     float smoothing_factor,
     float smooth_center_window
 );
+
+bool bms_is_fault_set(uint32_t fault_mask, BMS_FAULT_CODES fault_code);

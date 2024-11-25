@@ -8,6 +8,16 @@
 ; Set firmware version:
 (apply ext-set-fw-version (sysinfo 'fw-ver))
 
+(if (and (>= (+ (first (sysinfo 'fw-ver)) (* (second (sysinfo 'fw-ver)) 0.01)) 6.05)) {
+    (def bms-discovery-timer (systime))
+    (loopwhile (or (< (get-bms-val 'bms-can-id) 0) (< (secs-since bms-discovery-timer) 5)) (sleep 1))
+    (if (>= (get-bms-val 'bms-can-id) 0){
+        (import "src/bms-state.lisp" 'bms-state)
+        (read-eval-program bms-state)
+        (spawn bms-state-loop)
+    })
+})
+
 ; Set to 1 to monitor debug variables
 (define debug 1)
 
