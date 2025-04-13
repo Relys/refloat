@@ -43,7 +43,7 @@ static DMA_Stream_TypeDef *get_dma_stream(LedPin pin) {
     case LED_PIN_B9:
         return DMA1_Stream4;
     case LED_PIN_B10:
-        return DMA2_Stream1;
+        return DMA1_Stream1;
     default:
         return DMA1_Stream3;
     }
@@ -73,12 +73,13 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
         CCR_address = (uint32_t) &tim->CCR4;
         DMA_source = TIM_DMA_CC4;
     } else if (pin == LED_PIN_B10) {
-        // For B10, use TIM10 with different alternate function and clocks.
-        tim = TIM10;
+        // For B10, use TIM2 with different alternate function and clocks.
+        tim = TIM2;
+        dma_ch = DMA_Channel_3;
         pin_nr = 10;
-        CCR_address = (uint32_t) &tim->CCR1;
-        DMA_source = TIM_DMA_CC1;
-        alternate_func = 3;
+        CCR_address = (uint32_t) &tim->CCR3;
+        DMA_source = TIM_DMA_CC3;
+        alternate_func = 1;
     } else {
         pin_nr = 7;
         CCR_address = (uint32_t) &tim->CCR2;
@@ -94,8 +95,8 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
     // Deinitialize and init clocks/DMAs appropriately
     TIM_DeInit(tim);
     if (pin == LED_PIN_B10) {
-        RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM10, ENABLE);
-        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA2, ENABLE);
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
     } else {
         RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
         RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
@@ -162,12 +163,11 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
 static void deinit_dma(LedPin pin) {
     // Use the proper timer depending on the pin.
     if (pin == LED_PIN_B10) {
-        TIM_DeInit(TIM10);
-        DMA_DeInit(get_dma_stream(pin));
-    } else {
-        TIM_DeInit(TIM4);
+        TIM_DeInit(TIM2);
         DMA_DeInit(get_dma_stream(pin));
     }
+    TIM_DeInit(TIM4);
+    DMA_DeInit(get_dma_stream(pin));
 }
 
 inline static uint8_t color_order_bits(LedColorOrder order) {
@@ -366,16 +366,16 @@ void led_driver_destroy(LedDriver *driver) {
         }
     } else {
         // Multi-pin mode: deinit and free each strip's buffer.
+        if (driver->strips[0] || driver->strips[1] || driver->strips[2]) {
+            deinit_dma(LED_PIN_B10);
+        }
         if (driver->strips[0]) {
-            deinit_dma(LED_PIN_B8);
             VESC_IF->free(driver->strip_bitbuffs[0]);
         }
         if (driver->strips[1]) {
-            deinit_dma(LED_PIN_B9);
             VESC_IF->free(driver->strip_bitbuffs[1]);
         }
         if (driver->strips[2]) {
-            deinit_dma(LED_PIN_B10);
             VESC_IF->free(driver->strip_bitbuffs[2]);
         }
     }
