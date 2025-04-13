@@ -47,6 +47,7 @@ typedef struct {
 
     // Firmware version, passed in from Lisp
     int fw_version_major, fw_version_minor, fw_version_beta;
+    char *hw_name;
 
     Time time;
     MotorData motor;

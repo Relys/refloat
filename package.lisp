@@ -7,6 +7,7 @@
 
 ; Set firmware version:
 (apply ext-set-fw-version (sysinfo 'fw-ver))
+(apply ext-set-hw-name (sysinfo 'hw-name))
 
 ; Set to 1 to monitor debug variables
 (define debug 1)

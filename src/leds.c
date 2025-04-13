@@ -693,7 +693,7 @@ static const LedBar *target_bar(const Leds *leds, bool flip) {
     }
 }
 
-void leds_init(Leds *leds) {
+void leds_init(Leds *leds, char *hw_name) {
     led_strip_init(&leds->status_strip);
     led_strip_init(&leds->front_strip);
     led_strip_init(&leds->rear_strip);
@@ -742,7 +742,11 @@ void leds_init(Leds *leds) {
     leds->rear_dir_target = NULL;
     leds->rear_time_target = NULL;
 
-    led_driver_init(&leds->led_driver);
+    if (strcmp(hw_name, "GT")) {
+        led_driver_init(&leds->led_driver, true);
+    } else {
+        led_driver_init(&leds->led_driver, false);
+    }
 }
 
 void leds_setup(Leds *leds, CfgHwLeds *hw_cfg, const CfgLeds *cfg, FootpadSensorState fs_state) {

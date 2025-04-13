@@ -30,9 +30,10 @@ typedef struct {
     LedPin pin;
     const LedStrip *strips[STRIP_COUNT];
     uint16_t *strip_bitbuffs[STRIP_COUNT];
+    bool daisy_chain;
 } LedDriver;
 
-void led_driver_init(LedDriver *driver);
+void led_driver_init(LedDriver *driver, bool daisy_chain);
 
 bool led_driver_setup(LedDriver *driver, LedPin pin, const LedStrip **led_strips);
 

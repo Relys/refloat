@@ -1076,7 +1076,7 @@ static void data_init(Data *d) {
     lcm_init(&d->lcm, &d->float_conf.hardware.leds);
     charging_init(&d->charging);
     remote_init(&d->remote);
-    leds_init(&d->leds);
+    leds_init(&d->leds, d->hw_name);
     data_recorder_init(&d->data_record);
 
     konami_init(&d->flywheel_konami, flywheel_konami_sequence, sizeof(flywheel_konami_sequence));
@@ -2132,6 +2132,17 @@ static lbm_value ext_set_fw_version(lbm_value *args, lbm_uint argn) {
     return VESC_IF->lbm_enc_sym_true;
 }
 
+static lbm_value ext_set_hw_name(lbm_value *args, lbm_uint argn) {
+    Data *d = (Data *) ARG;
+    if (argn > 0) {
+        d->hw_name = VESC_IF->malloc(strlen(VESC_IF->lbm_dec_str(args[0])) + 1);
+        if (d->hw_name) {
+            strcpy(d->hw_name, VESC_IF->lbm_dec_str(args[0]));
+        }
+    }
+    return VESC_IF->lbm_enc_sym_true;
+}
+
 // Used to send the current or default configuration to VESC Tool.
 static int get_cfg(uint8_t *buffer, bool is_default) {
     Data *d = (Data *) ARG;
@@ -2210,6 +2221,9 @@ static void stop(void *arg) {
     }
     log_msg("Terminating.");
     leds_destroy(&d->leds);
+    if (d->hw_name) {
+        VESC_IF->free(d->hw_name);
+    }
     VESC_IF->free(d);
 }
 
@@ -2253,6 +2267,7 @@ INIT_FUN(lib_info *info) {
     VESC_IF->set_app_data_handler(on_command_received);
     VESC_IF->lbm_add_extension("ext-dbg", ext_dbg);
     VESC_IF->lbm_add_extension("ext-set-fw-version", ext_set_fw_version);
+    VESC_IF->lbm_add_extension("ext-set-hw-name", ext_set_hw_name);
 
     return true;
 }

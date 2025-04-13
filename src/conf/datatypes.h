@@ -41,7 +41,10 @@ typedef enum {
 
 typedef enum {
     LED_PIN_B6 = 0,
-    LED_PIN_B7
+    LED_PIN_B7,
+    LED_PIN_B8,
+    LED_PIN_B9,
+    LED_PIN_B10
 } LedPin;
 
 typedef enum {

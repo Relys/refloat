@@ -33,10 +33,18 @@
 #define WS2812_ONE (((uint32_t) TIM_PERIOD) * 0.7)
 #define BITBUFFER_PAD 1000
 
+// Extended get_dma_stream to support B8, B9, and B10.
 static DMA_Stream_TypeDef *get_dma_stream(LedPin pin) {
-    if (pin == LED_PIN_B6) {
+    switch (pin) {
+    case LED_PIN_B6:
         return DMA1_Stream0;
-    } else {
+    case LED_PIN_B8:
+        return DMA1_Stream7;
+    case LED_PIN_B9:
+        return DMA1_Stream4;
+    case LED_PIN_B10:
+        return DMA2_Stream1;
+    default:
         return DMA1_Stream3;
     }
 }
@@ -50,10 +58,27 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
     uint8_t pin_nr;
     uint32_t CCR_address;
     uint16_t DMA_source;
+    uint8_t alternate_func = 2;  // default alternate function for TIM4
+
     if (pin == LED_PIN_B6) {
         pin_nr = 6;
         CCR_address = (uint32_t) &tim->CCR1;
         DMA_source = TIM_DMA_CC1;
+    } else if (pin == LED_PIN_B8) {
+        pin_nr = 8;
+        CCR_address = (uint32_t) &tim->CCR3;
+        DMA_source = TIM_DMA_CC3;
+    } else if (pin == LED_PIN_B9) {
+        pin_nr = 9;
+        CCR_address = (uint32_t) &tim->CCR4;
+        DMA_source = TIM_DMA_CC4;
+    } else if (pin == LED_PIN_B10) {
+        // For B10, use TIM10 with different alternate function and clocks.
+        tim = TIM10;
+        pin_nr = 10;
+        CCR_address = (uint32_t) &tim->CCR1;
+        DMA_source = TIM_DMA_CC1;
+        alternate_func = 3;
     } else {
         pin_nr = 7;
         CCR_address = (uint32_t) &tim->CCR2;
@@ -61,12 +86,20 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
     }
 
     VESC_IF->set_pad_mode(
-        GPIOB, pin_nr, PAL_MODE_ALTERNATE(2) | PAL_STM32_OTYPE_OPENDRAIN | PAL_STM32_OSPEED_MID1
+        GPIOB,
+        pin_nr,
+        PAL_MODE_ALTERNATE(alternate_func) | PAL_STM32_OTYPE_OPENDRAIN | PAL_STM32_OSPEED_MID1
     );
 
+    // Deinitialize and init clocks/DMAs appropriately
     TIM_DeInit(tim);
-
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+    if (pin == LED_PIN_B10) {
+        RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM10, ENABLE);
+        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA2, ENABLE);
+    } else {
+        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+    }
     DMA_DeInit(dma_stream);
 
     DMA_InitTypeDef DMA_InitStructure;
@@ -88,8 +121,6 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
 
     DMA_Init(dma_stream, &DMA_InitStructure);
 
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
-
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
     TIM_TimeBaseStructure.TIM_Prescaler = 0;
     TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
@@ -108,9 +139,15 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
     if (CCR_address == (uint32_t) &tim->CCR1) {
         TIM_OC1Init(tim, &TIM_OCInitStructure);
         TIM_OC1PreloadConfig(tim, TIM_OCPreload_Enable);
-    } else {
+    } else if (CCR_address == (uint32_t) &tim->CCR2) {
         TIM_OC2Init(tim, &TIM_OCInitStructure);
         TIM_OC2PreloadConfig(tim, TIM_OCPreload_Enable);
+    } else if (CCR_address == (uint32_t) &tim->CCR3) {
+        TIM_OC3Init(tim, &TIM_OCInitStructure);
+        TIM_OC3PreloadConfig(tim, TIM_OCPreload_Enable);
+    } else if (CCR_address == (uint32_t) &tim->CCR4) {
+        TIM_OC4Init(tim, &TIM_OCInitStructure);
+        TIM_OC4PreloadConfig(tim, TIM_OCPreload_Enable);
     }
 
     TIM_ARRPreloadConfig(tim, ENABLE);
@@ -123,8 +160,14 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
 }
 
 static void deinit_dma(LedPin pin) {
-    TIM_DeInit(TIM4);
-    DMA_DeInit(get_dma_stream(pin));
+    // Use the proper timer depending on the pin.
+    if (pin == LED_PIN_B10) {
+        TIM_DeInit(TIM10);
+        DMA_DeInit(get_dma_stream(pin));
+    } else {
+        TIM_DeInit(TIM4);
+        DMA_DeInit(get_dma_stream(pin));
+    }
 }
 
 inline static uint8_t color_order_bits(LedColorOrder order) {
@@ -141,52 +184,106 @@ inline static uint8_t color_order_bits(LedColorOrder order) {
     return 24;
 }
 
-void led_driver_init(LedDriver *driver) {
+void led_driver_init(LedDriver *driver, bool daisy_chain) {
     driver->bitbuffer_length = 0;
     driver->bitbuffer = NULL;
+    driver->daisy_chain = daisy_chain;
 }
 
 bool led_driver_setup(LedDriver *driver, LedPin pin, const LedStrip **led_strips) {
-    driver->bitbuffer_length = 0;
+    if (driver->daisy_chain) {
+        driver->bitbuffer_length = 0;
 
-    size_t offsets[3] = {0};
-    for (size_t i = 0; i < STRIP_COUNT; ++i) {
-        const LedStrip *strip = led_strips[i];
-        if (!strip) {
-            driver->strips[i] = NULL;
-            driver->strip_bitbuffs[i] = NULL;
-            continue;
+        size_t offsets[3] = {0};
+        for (size_t i = 0; i < STRIP_COUNT; ++i) {
+            const LedStrip *strip = led_strips[i];
+            if (!strip) {
+                driver->strips[i] = NULL;
+                driver->strip_bitbuffs[i] = NULL;
+                continue;
+            }
+
+            driver->strips[i] = strip;
+            offsets[i] = driver->bitbuffer_length;
+            driver->bitbuffer_length += color_order_bits(strip->color_order) * strip->length;
         }
 
-        driver->strips[i] = strip;
-        offsets[i] = driver->bitbuffer_length;
-        driver->bitbuffer_length += color_order_bits(strip->color_order) * strip->length;
-    }
+        uint32_t padding_offset = driver->bitbuffer_length;
 
-    uint32_t padding_offset = driver->bitbuffer_length;
+        driver->bitbuffer_length += BITBUFFER_PAD;
+        driver->bitbuffer = VESC_IF->malloc(sizeof(uint16_t) * driver->bitbuffer_length);
+        driver->pin = pin;
 
-    driver->bitbuffer_length += BITBUFFER_PAD;
-    driver->bitbuffer = VESC_IF->malloc(sizeof(uint16_t) * driver->bitbuffer_length);
-    driver->pin = pin;
-
-    if (!driver->bitbuffer) {
-        log_error("Failed to init LED driver, out of memory.");
-        return false;
-    }
-
-    for (size_t i = 0; i < STRIP_COUNT; ++i) {
-        if (driver->strips[i]) {
-            driver->strip_bitbuffs[i] = driver->bitbuffer + offsets[i];
+        if (!driver->bitbuffer) {
+            log_error("Failed to init LED driver, out of memory.");
+            return false;
         }
-    }
 
-    for (uint32_t i = 0; i < padding_offset; ++i) {
-        driver->bitbuffer[i] = WS2812_ZERO;
-    }
+        for (size_t i = 0; i < STRIP_COUNT; ++i) {
+            if (driver->strips[i]) {
+                driver->strip_bitbuffs[i] = driver->bitbuffer + offsets[i];
+            }
+        }
 
-    memset(driver->bitbuffer + padding_offset, 0, sizeof(uint16_t) * BITBUFFER_PAD);
-    init_dma(pin, driver->bitbuffer, driver->bitbuffer_length);
-    return true;
+        for (uint32_t i = 0; i < padding_offset; ++i) {
+            driver->bitbuffer[i] = WS2812_ZERO;
+        }
+
+        memset(driver->bitbuffer + padding_offset, 0, sizeof(uint16_t) * BITBUFFER_PAD);
+        init_dma(pin, driver->bitbuffer, driver->bitbuffer_length);
+        return true;
+    } else {
+        // Multi-pin mode (parallel output): use fixed pins B8, B9, B10.
+        driver->bitbuffer_length = 0;  // not used in multi-pin mode.
+        for (size_t i = 0; i < STRIP_COUNT; ++i) {
+            const LedStrip *strip = led_strips[i];
+            if (!strip) {
+                driver->strips[i] = NULL;
+                driver->strip_bitbuffs[i] = NULL;
+                continue;
+            }
+            driver->strips[i] = strip;
+            uint32_t bits = color_order_bits(strip->color_order) * strip->length;
+            uint32_t total_len = bits + BITBUFFER_PAD;
+            driver->strip_bitbuffs[i] = VESC_IF->malloc(sizeof(uint16_t) * total_len);
+            if (!driver->strip_bitbuffs[i]) {
+                log_error("Failed to init LED driver, out of memory.");
+                return false;
+            }
+            // Fill LED data region with WS2812_ZERO.
+            for (uint32_t j = 0; j < bits; ++j) {
+                driver->strip_bitbuffs[i][j] = WS2812_ZERO;
+            }
+            memset(driver->strip_bitbuffs[i] + bits, 0, sizeof(uint16_t) * BITBUFFER_PAD);
+        }
+        // In multi-pin mode we ignore the passed-in "pin" and use fixed mappings:
+        // front 0 -> B8, rear 1 -> B9, status 2 -> B10.
+        if (driver->strips[0]) {
+            init_dma(
+                LED_PIN_B8,
+                driver->strip_bitbuffs[0],
+                color_order_bits(driver->strips[0]->color_order) * driver->strips[0]->length +
+                    BITBUFFER_PAD
+            );
+        }
+        if (driver->strips[1]) {
+            init_dma(
+                LED_PIN_B9,
+                driver->strip_bitbuffs[1],
+                color_order_bits(driver->strips[1]->color_order) * driver->strips[1]->length +
+                    BITBUFFER_PAD
+            );
+        }
+        if (driver->strips[2]) {
+            init_dma(
+                LED_PIN_B10,
+                driver->strip_bitbuffs[2],
+                color_order_bits(driver->strips[2]->color_order) * driver->strips[2]->length +
+                    BITBUFFER_PAD
+            );
+        }
+        return true;
+    }
 }
 
 inline static uint8_t cgamma(uint8_t c) {
@@ -259,12 +356,28 @@ void led_driver_paint(LedDriver *driver) {
 }
 
 void led_driver_destroy(LedDriver *driver) {
-    if (driver->bitbuffer) {
-        // only touch the timer/DMA if we inited it - something else could be using it
-        deinit_dma(driver->pin);
+    if (driver->daisy_chain) {
+        if (driver->bitbuffer) {
+            // only touch the timer/DMA if we inited it - something else could be using it
+            deinit_dma(driver->pin);
 
-        VESC_IF->free(driver->bitbuffer);
-        driver->bitbuffer = NULL;
+            VESC_IF->free(driver->bitbuffer);
+            driver->bitbuffer = NULL;
+        }
+    } else {
+        // Multi-pin mode: deinit and free each strip's buffer.
+        if (driver->strips[0]) {
+            deinit_dma(LED_PIN_B8);
+            VESC_IF->free(driver->strip_bitbuffs[0]);
+        }
+        if (driver->strips[1]) {
+            deinit_dma(LED_PIN_B9);
+            VESC_IF->free(driver->strip_bitbuffs[1]);
+        }
+        if (driver->strips[2]) {
+            deinit_dma(LED_PIN_B10);
+            VESC_IF->free(driver->strip_bitbuffs[2]);
+        }
     }
     driver->bitbuffer_length = 0;
 }
