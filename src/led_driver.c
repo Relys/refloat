@@ -33,6 +33,10 @@
 #define WS2812_ONE (((uint32_t) TIM_PERIOD) * 0.7)
 #define BITBUFFER_PAD 1000
 
+// Static variables to track which timers/DMA streams are in use
+static bool tim4_initialized = false;
+static bool tim2_initialized = false;
+
 // Extended get_dma_stream to support B8, B9, and B10.
 static DMA_Stream_TypeDef *get_dma_stream(LedPin pin) {
     switch (pin) {
@@ -54,7 +58,7 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
     uint32_t dma_ch = DMA_Channel_2;
     DMA_Stream_TypeDef *dma_stream = get_dma_stream(pin);
 
-    // settings for different pins in one place, can be extended if more pins are added
+    // settings for different pins in one place
     uint8_t pin_nr;
     uint32_t CCR_address;
     uint16_t DMA_source;
@@ -86,51 +90,39 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
         DMA_source = TIM_DMA_CC2;
     }
 
+    // Configure GPIO pin
     VESC_IF->set_pad_mode(
         GPIOB,
         pin_nr,
         PAL_MODE_ALTERNATE(alternate_func) | PAL_STM32_OTYPE_OPENDRAIN | PAL_STM32_OSPEED_MID1
     );
 
-    // Deinitialize and init clocks/DMAs appropriately
-    TIM_DeInit(tim);
-    if (pin == LED_PIN_B10) {
-        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
-        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
-    } else {
-        RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
-        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+    // Initialize timer only if not already initialized
+    if ((pin == LED_PIN_B10 && !tim2_initialized) || (pin != LED_PIN_B10 && !tim4_initialized)) {
+
+        if (pin == LED_PIN_B10) {
+            RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+            tim2_initialized = true;
+        } else {
+            RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+            RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+            tim4_initialized = true;
+        }
+
+        TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
+        TIM_TimeBaseStructure.TIM_Prescaler = 0;
+        TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+        TIM_TimeBaseStructure.TIM_Period = TIM_PERIOD;
+        TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+        TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
+
+        TIM_TimeBaseInit(tim, &TIM_TimeBaseStructure);
+        TIM_ARRPreloadConfig(tim, ENABLE);
+        TIM_Cmd(tim, ENABLE);  // Start the timer
     }
-    DMA_DeInit(dma_stream);
 
-    DMA_InitTypeDef DMA_InitStructure;
-    DMA_InitStructure.DMA_PeripheralBaseAddr = CCR_address;
-    DMA_InitStructure.DMA_Channel = dma_ch;
-    DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t) (buffer);
-    DMA_InitStructure.DMA_DIR = DMA_DIR_MemoryToPeripheral;
-    DMA_InitStructure.DMA_BufferSize = length;
-    DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-    DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-    DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
-    DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
-    DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
-    DMA_InitStructure.DMA_Priority = DMA_Priority_High;
-    DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Disable;
-    DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_Full;
-    DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single;
-    DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
-
-    DMA_Init(dma_stream, &DMA_InitStructure);
-
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-    TIM_TimeBaseStructure.TIM_Prescaler = 0;
-    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-    TIM_TimeBaseStructure.TIM_Period = TIM_PERIOD;
-    TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-    TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
-
-    TIM_TimeBaseInit(tim, &TIM_TimeBaseStructure);
-
+    // Configure timer output compare for this channel
     TIM_OCInitTypeDef TIM_OCInitStructure;
     TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
     TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
@@ -151,12 +143,28 @@ static void init_dma(LedPin pin, uint16_t *buffer, uint32_t length) {
         TIM_OC4PreloadConfig(tim, TIM_OCPreload_Enable);
     }
 
-    TIM_ARRPreloadConfig(tim, ENABLE);
+    // Initialize DMA for this pin
+    DMA_DeInit(dma_stream);
 
-    TIM_Cmd(tim, ENABLE);
+    DMA_InitTypeDef DMA_InitStructure;
+    DMA_InitStructure.DMA_PeripheralBaseAddr = CCR_address;
+    DMA_InitStructure.DMA_Channel = dma_ch;
+    DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t) (buffer);
+    DMA_InitStructure.DMA_DIR = DMA_DIR_MemoryToPeripheral;
+    DMA_InitStructure.DMA_BufferSize = length;
+    DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+    DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
+    DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
+    DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
+    DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
+    DMA_InitStructure.DMA_Priority = DMA_Priority_High;
+    DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Disable;
+    DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_Full;
+    DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single;
+    DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
 
+    DMA_Init(dma_stream, &DMA_InitStructure);
     DMA_Cmd(dma_stream, ENABLE);
-
     TIM_DMACmd(tim, DMA_source, ENABLE);
 }
 
@@ -164,9 +172,10 @@ static void deinit_dma(LedPin pin) {
     // Use the proper timer depending on the pin.
     if (pin == LED_PIN_B10) {
         TIM_DeInit(TIM2);
-        DMA_DeInit(get_dma_stream(pin));
+        tim2_initialized = false;
     }
     TIM_DeInit(TIM4);
+    tim4_initialized = false;
     DMA_DeInit(get_dma_stream(pin));
 }
 
@@ -365,18 +374,21 @@ void led_driver_destroy(LedDriver *driver) {
             driver->bitbuffer = NULL;
         }
     } else {
-        // Multi-pin mode: deinit and free each strip's buffer.
-        if (driver->strips[0] || driver->strips[1] || driver->strips[2]) {
-            deinit_dma(LED_PIN_B10);
-        }
-        if (driver->strips[0]) {
+        // Multi-pin mode: deinit each active strip
+        if (driver->strips[0]) {  // Front (B8)
+            deinit_dma(LED_PIN_B8);
             VESC_IF->free(driver->strip_bitbuffs[0]);
+            driver->strip_bitbuffs[0] = NULL;
         }
-        if (driver->strips[1]) {
+        if (driver->strips[1]) {  // Rear (B9)
+            deinit_dma(LED_PIN_B9);
             VESC_IF->free(driver->strip_bitbuffs[1]);
+            driver->strip_bitbuffs[1] = NULL;
         }
-        if (driver->strips[2]) {
+        if (driver->strips[2]) {  // Status (B10)
+            deinit_dma(LED_PIN_B10);
             VESC_IF->free(driver->strip_bitbuffs[2]);
+            driver->strip_bitbuffs[2] = NULL;
         }
     }
     driver->bitbuffer_length = 0;
